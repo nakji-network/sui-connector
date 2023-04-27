@@ -17,31 +17,13 @@ use sui_sdk::{SuiClient, SuiClientBuilder};
 
 #[derive(Parser, Debug)]
 pub struct Args {
-    /// Full node address
-    #[arg(short, long, default_value_t = String::from("127.0.0.1:9000"))]
-    addr: String,
+    /// Websocket RPC endpoint
+    #[arg(long, default_value_t = String::from("ws://127.0.0.1:9000"))]
+    ws_url: String,
 
-    /// Whether to use secure connection
-    #[arg(short, long, default_value_t = false)]
-    secured: bool,
-}
-
-impl Args {
-    pub fn ws_url(&self) -> String {
-        return if self.secured {
-            format!("wss://{}", self.addr)
-        } else {
-            format!("ws://{}", self.addr)
-        };
-    }
-
-    pub fn http_url(&self) -> String {
-        return if self.secured {
-            format!("https://{}", self.addr)
-        } else {
-            format!("http://{}", self.addr)
-        };
-    }
+    /// HTTP RPC endpoint
+    #[arg(long, default_value_t = String::from("http://127.0.0.1:9000"))]
+    http_url: String,
 }
 
 #[tokio::main]
@@ -49,8 +31,8 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     let sui = SuiClientBuilder::default()
-        .ws_url(args.ws_url())
-        .build(args.http_url())
+        .ws_url(args.ws_url)
+        .build(args.http_url)
         .await?;
 
     let sui2 = sui.clone();
