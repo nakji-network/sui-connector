@@ -17,7 +17,6 @@ defaults:
 jobs:
   test:
     name: Build and Test
-    needs: [ setup ]
 
     runs-on: ubuntu-latest
 
@@ -53,7 +52,7 @@ jobs:
   build:
     if: github.event_name != 'pull_request' # this only runs for main and staging
     name: Publish Docker image
-    needs: [ setup , test ]
+    needs: [ test ]
     runs-on: ubuntu-latest
 
     # Add "id-token" with the intended permissions. Required with google-github-actions/auth.
