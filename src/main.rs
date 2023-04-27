@@ -1,11 +1,12 @@
 mod sui_system;
 
+use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 
 use crate::sui_system::validator_set::ValidatorEpochInfoEventV2;
 use crate::sui_system::validator_set_json::ValidatorEpochInfoEventV2JSON;
 
-use anyhow::{bail, Ok};
+use anyhow::bail;
 use clap::Parser;
 use futures::StreamExt;
 use nakji_connector::connector::Connector;
@@ -19,7 +20,7 @@ use sui_sdk::types::Identifier;
 use sui_sdk::{SuiClient, SuiClientBuilder};
 
 #[derive(Parser, Debug)]
-pub struct Args {
+struct Args {
     /// Websocket RPC endpoint
     #[arg(long, default_value_t = String::from("ws://127.0.0.1:9000"))]
     ws_url: String,
@@ -33,6 +34,11 @@ pub struct Args {
     duration: u64,
 }
 
+struct Event {
+    t: MessageType,
+    e: SuiEvent,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -42,48 +48,6 @@ async fn main() -> anyhow::Result<()> {
         .build(args.http_url)
         .await?;
 
-    let sui2 = sui.clone();
-
-    tokio::spawn(async move {
-        if let Err(err) = backfill(sui2, args.duration).await {
-            println!("{}", err)
-        }
-    });
-
-    subscribe(sui).await?;
-
-    Ok(())
-}
-
-async fn backfill(sui: SuiClient, duration: u64) -> anyhow::Result<()> {
-    println!("start backfill");
-
-    let mut c = Connector::new();
-
-    c.register_protos(
-        MessageType::BF,
-        vec![Box::new(ValidatorEpochInfoEventV2::new())],
-    )
-    .await;
-
-    let filter = event_filter(duration)?;
-
-    let mut ss = sui
-        .event_api()
-        .get_events_stream(filter, None, true)
-        .boxed();
-    while let Some(event) = ss.next().await {
-        if let Err(err) = handle_event(&mut c, event, MessageType::BF).await {
-            println!("{}", err)
-        }
-    }
-
-    println!("stop backfill");
-
-    Ok(())
-}
-
-async fn subscribe(sui: SuiClient) -> anyhow::Result<()> {
     let mut c = Connector::new();
 
     c.register_protos(
@@ -92,11 +56,37 @@ async fn subscribe(sui: SuiClient) -> anyhow::Result<()> {
     )
     .await;
 
-    let filter = event_filter(0)?;
+    c.register_protos(
+        MessageType::BF,
+        vec![Box::new(ValidatorEpochInfoEventV2::new())],
+    )
+    .await;
 
-    let mut ss = sui.event_api().subscribe_event(filter).await?;
-    while let Some(event) = ss.next().await {
-        if let Err(err) = handle_event(&mut c, event?, MessageType::FCT).await {
+    let (tx, rx) = mpsc::channel::<Event>();
+
+    let sui2 = sui.clone();
+    let tx2 = tx.clone();
+
+    tokio::spawn(async move {
+        println!("backfill started");
+        match backfill(sui2, tx2, args.duration).await {
+            Err(err) => {
+                println!("backfill failed: {}", err)
+            }
+            Ok(_) => {
+                println!("backfill stopped");
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        if let Err(err) = subscribe(sui, tx).await {
+            println!("subscribe failed: {}", err)
+        }
+    });
+
+    for event in rx {
+        if let Err(err) = handle_event(&mut c, event).await {
             println!("{}", err)
         }
     }
@@ -104,13 +94,48 @@ async fn subscribe(sui: SuiClient) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_event(c: &mut Connector, event: SuiEvent, t: MessageType) -> anyhow::Result<()> {
-    match event.type_.name.to_string().as_str() {
-        "ValidatorEpochInfoEventV2" => match event.timestamp_ms {
+async fn backfill(sui: SuiClient, tx: mpsc::Sender<Event>, duration: u64) -> anyhow::Result<()> {
+    let filter = event_filter(duration)?;
+
+    let mut ss = sui
+        .event_api()
+        .get_events_stream(filter, None, true)
+        .boxed();
+
+    while let Some(event) = ss.next().await {
+        tx.send(Event {
+            t: MessageType::BF,
+            e: event,
+        })?
+    }
+
+    Ok(())
+}
+
+async fn subscribe(sui: SuiClient, tx: mpsc::Sender<Event>) -> anyhow::Result<()> {
+    let filter = event_filter(0)?;
+
+    let mut ss = sui.event_api().subscribe_event(filter).await?;
+
+    while let Some(event) = ss.next().await {
+        tx.send(Event {
+            t: MessageType::BF,
+            e: event?,
+        })?
+    }
+
+    Ok(())
+}
+
+async fn handle_event(c: &mut Connector, event: Event) -> anyhow::Result<()> {
+    let e = event.e;
+    let t = event.t;
+
+    match e.type_.name.to_string().as_str() {
+        "ValidatorEpochInfoEventV2" => match e.timestamp_ms {
             Some(timestamp_ms) => {
-                let data =
-                    serde_json::from_value::<ValidatorEpochInfoEventV2JSON>(event.parsed_json)?;
-                let proto_msg = data.protobuf_message(timestamp_ms, &event.id)?;
+                let data = serde_json::from_value::<ValidatorEpochInfoEventV2JSON>(e.parsed_json)?;
+                let proto_msg = data.protobuf_message(timestamp_ms, &e.id)?;
 
                 let topic = topic(&c, Box::new(ValidatorEpochInfoEventV2::new()), t.clone());
                 let key = Key::new(String::from(""), String::from(""));
@@ -118,20 +143,16 @@ async fn handle_event(c: &mut Connector, event: SuiEvent, t: MessageType) -> any
 
                 c.producer.produce_transactional_messages(vec![msg]).await?;
 
-                println!("{:?} -> {} {}", t, event.transaction_module, event.type_);
+                println!("{:?} -> {} {}", t, e.transaction_module, e.type_);
 
                 return Ok(());
             }
             None => {
-                bail!("event without timestamp: {:?}", event.id)
+                bail!("event without timestamp: {:?}", e.id)
             }
         },
         _ => {
-            bail!(
-                "unhandled event: {} {}",
-                event.transaction_module,
-                event.type_
-            )
+            bail!("unhandled event: {} {}", e.transaction_module, e.type_)
         }
     }
 }
@@ -161,7 +182,7 @@ fn event_filter(duration: u64) -> anyhow::Result<EventFilter> {
     let mut filter = EventFilter::All(vec![EventFilter::MoveModule { package, module }]);
 
     if duration > 0 {
-        let start_time = (SystemTime::now() + Duration::from_secs(duration))
+        let start_time = (SystemTime::now() - Duration::from_secs(duration))
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_millis() as u64;
 
@@ -173,6 +194,8 @@ fn event_filter(duration: u64) -> anyhow::Result<EventFilter> {
             start_time,
             end_time,
         };
+
+        println!("{:?}", time_range);
 
         filter = filter.and(time_range);
     }
