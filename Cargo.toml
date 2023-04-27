@@ -1,0 +1,21 @@
+[package]
+name = "sui"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = { version = "1.0", default-features = false }
+clap = "4.2.4"
+fastcrypto = "0.1.4"
+futures = "0.3"
+hex = "0.4.3"
+move-core-types = "0.0.3"
+nakji-connector = "0.1.0"
+protobuf = "3.2.0"
+protobuf-json-mapping = "3.2.0"
+serde = "1.0.160"
+serde_json = "1.0.96"
+sui-sdk = { git = "https://github.com/MystenLabs/sui.git", rev = "testnet-0.33.1" }
+tokio = { version = "1", features = ["full"] }

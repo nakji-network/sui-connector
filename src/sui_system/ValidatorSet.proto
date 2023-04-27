@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+import "google/protobuf/timestamp.proto";
+
+package nakji.sui.ValidatorSet;
+
+option go_package = "github.com/nakji-network/connectors/sui";
+
+message PoolTokenExchangeRate {
+    uint64 pool_token_amount = 1;
+    uint64 sui_amount = 2;
+}
+
+message ValidatorEpochInfoEventV2 {
+    google.protobuf.Timestamp ts = 1;
+    bytes tx_digest = 2;
+    uint64 event_seq = 3;
+    uint64 epoch = 4;
+    bytes validator_address = 5;
+    uint64 reference_gas_survey_quote = 6;
+    uint64 stake = 7;
+    uint64 commission_rate = 8;
+    uint64 pool_staking_reward = 9;
+    uint64 storage_fund_staking_reward = 10;
+    PoolTokenExchangeRate pool_token_exchange_rate = 11;
+    repeated bytes tallying_rule_reporters = 12;
+    uint64 tallying_rule_global_score = 13;
+}

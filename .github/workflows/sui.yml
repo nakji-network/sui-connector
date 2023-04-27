@@ -1,0 +1,134 @@
+name: SUI Connector
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, staging ]
+    paths:
+      - '**'
+      - '.github/workflows/sui.yml'
+  pull_request:
+    branches: [ main, staging ]
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Build and Test
+    needs: [ setup ]
+
+    runs-on: ubuntu-latest
+
+    # Add "id-token" with the intended permissions. Required with google-github-actions/auth.
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+            
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v1
+
+    - name: Build
+      id: build-tester
+      uses: docker/build-push-action@v2
+      env:
+        BRANCH: ${{ env.GITHUB_REF_SLUG }}
+      with:
+        file: Dockerfile
+        push: false
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        target: test
+        outputs: type=docker
+
+    - name: Test
+      run: |
+        docker run ${{ steps.build-tester.outputs.imageid }}
+
+  build:
+    if: github.event_name != 'pull_request' # this only runs for main and staging
+    name: Publish Docker image
+    needs: [ setup , test ]
+    runs-on: ubuntu-latest
+
+    # Add "id-token" with the intended permissions. Required with google-github-actions/auth.
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v1
+
+    - name: Run read-yaml action
+      id: yaml-data
+      uses: KJ002/read-yaml@main      # You may wish to replace main with a version tag such as '1.6' etc.
+      with:
+        file: 'manifest.yaml'          # File to read from
+        key-path: '["version"]' # Access the runs key then the using key and retuns the value.
+
+    - name: Docker meta
+      id: meta
+      uses: docker/metadata-action@v3
+      with:
+        images: ${{ secrets.DOCKER_REPO }}/sui-connector
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          # output 0.1.2
+          type=semver,pattern={{version}},value=${{ steps.yaml-data.outputs.data }}
+          # output 0.1
+          type=semver,pattern={{major}}.{{minor}},value=${{ steps.yaml-data.outputs.data }}
+          # disabled if major zero
+          type=semver,pattern={{major}},enable=${{ !startsWith(steps.yaml-data.outputs.data, '0.') }}
+        labels: |
+          org.opencontainers.image.title=sui-connector
+          org.opencontainers.image.description=
+
+    - name: Authenticate to Google Cloud
+      id: auth
+      uses: 'google-github-actions/auth@v0'
+      with:
+        token_format: 'access_token'
+        workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+    - name: Login to google Container Registry
+      run: |-
+        echo '${{ steps.auth.outputs.access_token }}' | docker login -u oauth2accesstoken --password-stdin ${{ secrets.DOCKER_REPO }}
+
+    - name: Build and Publish
+      uses: docker/build-push-action@v2
+      env:
+        BRANCH: ${{ env.GITHUB_REF_SLUG }}
+      with:
+        build-args: |
+          VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
+          BUILD=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}
+          PACKAGE=sui
+        file: Dockerfile
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Post to a Slack channel
+      id: slack
+      uses: slackapi/slack-github-action@v1.19.0
+      with:
+        # Slack channel id, channel name, or user id to post message.
+        # See also: https://api.slack.com/methods/chat.postMessage#channels
+        channel-id: 'C03DL2A73SB' #devops-alerts
+        # For posting a simple plain text message
+        slack-message: "GitHub Action build result: *${{ job.status }}* <${{ github.event.pull_request.html_url || github.event.head_commit.url }}|${{ github.sha }}>\n---\n\n${{ steps.meta.outputs.tags }}"
+      env:
+        SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
