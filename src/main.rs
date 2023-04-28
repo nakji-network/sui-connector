@@ -15,23 +15,13 @@ use nakji_connector::kafka_utils::{topic, Message, MessageType, Topic};
 use protobuf::MessageDyn;
 use serde_json;
 use sui_sdk::rpc_types::{EventFilter, SuiEvent};
-use sui_sdk::types::base_types::ObjectID;
-use sui_sdk::types::Identifier;
 use sui_sdk::{SuiClient, SuiClientBuilder};
 
 #[derive(Parser, Debug)]
 struct Args {
-    /// Websocket RPC endpoint
-    #[arg(long, default_value_t = String::from("ws://127.0.0.1:9000"))]
-    ws_url: String,
-
-    /// HTTP RPC endpoint
-    #[arg(long, default_value_t = String::from("http://127.0.0.1:9000"))]
-    http_url: String,
-
-    /// Number of seconds to backfill (0 means backfill all)
+    /// Backfill range in seconds (<0: Don't Backfill, =0: Backfill all)
     #[arg(short, long, default_value_t = 0)]
-    duration: u64,
+    duration: i64,
 }
 
 struct Event {
@@ -42,11 +32,6 @@ struct Event {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-
-    let sui = SuiClientBuilder::default()
-        .ws_url(args.ws_url)
-        .build(args.http_url)
-        .await?;
 
     let mut c = Connector::new();
 
@@ -62,22 +47,39 @@ async fn main() -> anyhow::Result<()> {
     )
     .await;
 
+    let ws_url = c.config.sub_config["ws_url"]
+        .as_str()
+        .unwrap_or("ws://127.0.0.1:9000");
+
+    let http_url = c.config.sub_config["http_url"]
+        .as_str()
+        .unwrap_or("http://127.0.0.1:9000");
+
+    println!("connect to [{}] [{}]", ws_url, http_url);
+
+    let sui = SuiClientBuilder::default()
+        .ws_url(ws_url)
+        .build(http_url)
+        .await?;
+
     let (tx, rx) = mpsc::channel::<Event>();
 
-    let sui2 = sui.clone();
-    let tx2 = tx.clone();
+    if args.duration >= 0 {
+        let sui2 = sui.clone();
+        let tx2 = tx.clone();
 
-    tokio::spawn(async move {
-        println!("backfill started");
-        match backfill(sui2, tx2, args.duration).await {
-            Err(err) => {
-                println!("backfill failed: {}", err)
+        tokio::spawn(async move {
+            println!("backfill started");
+            match backfill(sui2, tx2, args.duration as u64).await {
+                Err(err) => {
+                    println!("backfill failed: {}", err)
+                }
+                Ok(_) => {
+                    println!("backfill stopped");
+                }
             }
-            Ok(_) => {
-                println!("backfill stopped");
-            }
-        }
-    });
+        });
+    }
 
     tokio::spawn(async move {
         if let Err(err) = subscribe(sui, tx).await {
@@ -119,7 +121,7 @@ async fn subscribe(sui: SuiClient, tx: mpsc::Sender<Event>) -> anyhow::Result<()
 
     while let Some(event) = ss.next().await {
         tx.send(Event {
-            t: MessageType::BF,
+            t: MessageType::FCT,
             e: event?,
         })?
     }
@@ -173,13 +175,10 @@ fn topic(c: &Connector, msg: Box<dyn MessageDyn>, t: MessageType) -> Topic {
 }
 
 fn event_filter(duration: u64) -> anyhow::Result<EventFilter> {
-    let package = ObjectID::from_hex_literal(
-        "0x0000000000000000000000000000000000000000000000000000000000000003",
-    )?;
+    let tag =
+        sui_sdk::types::parse_sui_struct_tag("0x3::validator_set::ValidatorEpochInfoEventV2")?;
 
-    let module = Identifier::new(String::from("sui_system"))?;
-
-    let mut filter = EventFilter::All(vec![EventFilter::MoveModule { package, module }]);
+    let mut filter = EventFilter::MoveEventType(tag);
 
     if duration > 0 {
         let start_time = (SystemTime::now() - Duration::from_secs(duration))
@@ -194,8 +193,6 @@ fn event_filter(duration: u64) -> anyhow::Result<EventFilter> {
             start_time,
             end_time,
         };
-
-        println!("{:?}", time_range);
 
         filter = filter.and(time_range);
     }
