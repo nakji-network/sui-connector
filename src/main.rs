@@ -17,6 +17,11 @@ use serde_json;
 use sui_sdk::rpc_types::{EventFilter, SuiEvent};
 use sui_sdk::{SuiClient, SuiClientBuilder};
 
+const EVENT_TYPES: &'static [&'static str] = &[
+    "0x3::validator_set::ValidatorEpochInfoEventV2",
+    // "0x3::sui_system_state_inner::SystemEpochInfoEvent2",
+];
+
 #[derive(Parser, Debug)]
 struct Args {
     /// Backfill range in seconds (<0: Don't Backfill, =0: Backfill all)
@@ -133,9 +138,10 @@ async fn handle_event(c: &mut Connector, event: Event) -> anyhow::Result<()> {
     let e = event.e;
     let t = event.t;
 
-    match e.type_.name.to_string().as_str() {
-        "ValidatorEpochInfoEventV2" => match e.timestamp_ms {
-            Some(timestamp_ms) => {
+    match e.timestamp_ms {
+        None => bail!("event without timestamp: {:?}", e.id),
+        Some(timestamp_ms) => match e.type_.to_string().as_str() {
+            "0x3::validator_set::ValidatorEpochInfoEventV2" => {
                 let data = serde_json::from_value::<ValidatorEpochInfoEventV2JSON>(e.parsed_json)?;
                 let proto_msg = data.protobuf_message(timestamp_ms, &e.id)?;
 
@@ -145,17 +151,12 @@ async fn handle_event(c: &mut Connector, event: Event) -> anyhow::Result<()> {
 
                 c.producer.produce_transactional_messages(vec![msg]).await?;
 
-                println!("{:?} -> {} {}", t, e.transaction_module, e.type_);
+                println!("{:?} -> {}", t, e.type_);
 
                 return Ok(());
             }
-            None => {
-                bail!("event without timestamp: {:?}", e.id)
-            }
+            _ => bail!("unhandled event: {}", e.type_),
         },
-        _ => {
-            bail!("unhandled event: {} {}", e.transaction_module, e.type_)
-        }
     }
 }
 
@@ -175,10 +176,19 @@ fn topic(c: &Connector, msg: Box<dyn MessageDyn>, t: MessageType) -> Topic {
 }
 
 fn event_filter(duration: u64) -> anyhow::Result<EventFilter> {
-    let tag =
-        sui_sdk::types::parse_sui_struct_tag("0x3::validator_set::ValidatorEpochInfoEventV2")?;
+    let mut filter: EventFilter;
 
-    let mut filter = EventFilter::MoveEventType(tag);
+    if EVENT_TYPES.len() == 1 {
+        filter = EventFilter::MoveEventType(sui_sdk::types::parse_sui_struct_tag(EVENT_TYPES[0])?)
+    } else {
+        let mut event_types = Vec::new();
+        for event_type in EVENT_TYPES {
+            event_types.push(EventFilter::MoveEventType(
+                sui_sdk::types::parse_sui_struct_tag(event_type)?,
+            ))
+        }
+        filter = EventFilter::Any(event_types);
+    }
 
     if duration > 0 {
         let start_time = (SystemTime::now() - Duration::from_secs(duration))
