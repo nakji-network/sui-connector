@@ -1,7 +1,7 @@
 mod sui_system;
 
 use std::sync::mpsc;
-use std::time::{Duration, SystemTime};
+use std::vec;
 
 use crate::sui_system::validator_set::ValidatorEpochInfoEventV2;
 use crate::sui_system::validator_set_json::ValidatorEpochInfoEventV2JSON;
@@ -15,18 +15,20 @@ use nakji_connector::kafka_utils::{topic, Message, MessageType, Topic};
 use protobuf::MessageDyn;
 use serde_json;
 use sui_sdk::rpc_types::{EventFilter, SuiEvent};
+use sui_sdk::types::event::EventID;
 use sui_sdk::{SuiClient, SuiClientBuilder};
 
-const EVENT_TYPES: &'static [&'static str] = &[
-    "0x3::validator_set::ValidatorEpochInfoEventV2",
-    // "0x3::sui_system_state_inner::SystemEpochInfoEvent2",
-];
+const CHANNEL_SIZE: usize = 1000;
+
+const QUERY_PAGE_SZIE: usize = 100;
+
+const EVENT_TYPES: &'static [&'static str] = &["0x3::validator_set::ValidatorEpochInfoEventV2"];
 
 #[derive(Parser, Debug)]
 struct Args {
-    /// Backfill range in seconds (<0: Don't Backfill, =0: Backfill all)
+    /// Limit number of events to backfill (<0: Don't Backfill, =0: Backfill all)
     #[arg(short, long, default_value_t = 0)]
-    duration: i64,
+    limit: i64,
 }
 
 struct Event {
@@ -67,28 +69,35 @@ async fn main() -> anyhow::Result<()> {
         .build(http_url)
         .await?;
 
-    let (tx, rx) = mpsc::channel::<Event>();
+    let (tx, rx) = mpsc::sync_channel::<Event>(CHANNEL_SIZE);
 
-    if args.duration >= 0 {
-        let sui2 = sui.clone();
-        let tx2 = tx.clone();
+    if args.limit >= 0 {
+        for event_type in EVENT_TYPES {
+            let sui = sui.clone();
+            let tx = tx.clone();
+            let filter =
+                EventFilter::MoveEventType(sui_sdk::types::parse_sui_struct_tag(event_type)?);
+            let limit = if args.limit == 0 {
+                None
+            } else {
+                Some(args.limit as usize)
+            };
 
-        tokio::spawn(async move {
-            println!("backfill started");
-            match backfill(sui2, tx2, args.duration as u64).await {
-                Err(err) => {
-                    println!("backfill failed: {}", err)
+            tokio::spawn(async move {
+                println!("query [{}] started", event_type);
+                match query_events(sui, tx, filter, limit).await {
+                    Ok(_) => println!("query [{}] stopped", event_type),
+                    Err(err) => println!("query [{}] failed: {}", event_type, err),
                 }
-                Ok(_) => {
-                    println!("backfill stopped");
-                }
-            }
-        });
+            });
+        }
     }
 
     tokio::spawn(async move {
-        if let Err(err) = subscribe(sui, tx).await {
-            println!("subscribe failed: {}", err)
+        println!("subscription started");
+        match subscribe(sui, tx).await {
+            Ok(_) => println!("subscription stopped"),
+            Err(err) => println!("subscription failed: {}", err),
         }
     });
 
@@ -101,26 +110,14 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn backfill(sui: SuiClient, tx: mpsc::Sender<Event>, duration: u64) -> anyhow::Result<()> {
-    let filter = event_filter(duration)?;
-
-    let mut ss = sui
-        .event_api()
-        .get_events_stream(filter, None, true)
-        .boxed();
-
-    while let Some(event) = ss.next().await {
-        tx.send(Event {
-            t: MessageType::BF,
-            e: event,
-        })?
+async fn subscribe(sui: SuiClient, tx: mpsc::SyncSender<Event>) -> anyhow::Result<()> {
+    let mut event_types = Vec::new();
+    for event_type in EVENT_TYPES {
+        event_types.push(EventFilter::MoveEventType(
+            sui_sdk::types::parse_sui_struct_tag(event_type)?,
+        ))
     }
-
-    Ok(())
-}
-
-async fn subscribe(sui: SuiClient, tx: mpsc::Sender<Event>) -> anyhow::Result<()> {
-    let filter = event_filter(0)?;
+    let filter = EventFilter::Any(event_types);
 
     let mut ss = sui.event_api().subscribe_event(filter).await?;
 
@@ -129,6 +126,56 @@ async fn subscribe(sui: SuiClient, tx: mpsc::Sender<Event>) -> anyhow::Result<()
             t: MessageType::FCT,
             e: event?,
         })?
+    }
+
+    Ok(())
+}
+
+async fn query_events(
+    sui: SuiClient,
+    tx: mpsc::SyncSender<Event>,
+    query: EventFilter,
+    limit: Option<usize>,
+) -> anyhow::Result<()> {
+    match limit {
+        None => {
+            let mut ss = sui.event_api().get_events_stream(query, None, true).boxed();
+
+            while let Some(event) = ss.next().await {
+                tx.send(Event {
+                    t: MessageType::BF,
+                    e: event,
+                })?
+            }
+        }
+        Some(mut limit) => {
+            let mut is_first = true;
+            let mut cursor: Option<EventID> = None;
+
+            while limit > 0 && (is_first || cursor.is_some()) {
+                let query_size = if limit > QUERY_PAGE_SZIE {
+                    QUERY_PAGE_SZIE
+                } else {
+                    limit
+                };
+
+                let page = sui
+                    .event_api()
+                    .query_events(query.clone(), cursor, Some(query_size), true)
+                    .await?;
+
+                for event in page.data {
+                    tx.send(Event {
+                        t: MessageType::BF,
+                        e: event,
+                    })?
+                }
+
+                limit -= query_size;
+                is_first = false;
+                cursor = page.next_cursor;
+            }
+        }
     }
 
     Ok(())
@@ -173,39 +220,4 @@ fn topic(c: &Connector, msg: Box<dyn MessageDyn>, t: MessageType) -> Topic {
     );
 
     return topic;
-}
-
-fn event_filter(duration: u64) -> anyhow::Result<EventFilter> {
-    let mut filter: EventFilter;
-
-    if EVENT_TYPES.len() == 1 {
-        filter = EventFilter::MoveEventType(sui_sdk::types::parse_sui_struct_tag(EVENT_TYPES[0])?)
-    } else {
-        let mut event_types = Vec::new();
-        for event_type in EVENT_TYPES {
-            event_types.push(EventFilter::MoveEventType(
-                sui_sdk::types::parse_sui_struct_tag(event_type)?,
-            ))
-        }
-        filter = EventFilter::Any(event_types);
-    }
-
-    if duration > 0 {
-        let start_time = (SystemTime::now() - Duration::from_secs(duration))
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_millis() as u64;
-
-        let end_time = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_millis() as u64;
-
-        let time_range = EventFilter::TimeRange {
-            start_time,
-            end_time,
-        };
-
-        filter = filter.and(time_range);
-    }
-
-    return Ok(filter);
 }
