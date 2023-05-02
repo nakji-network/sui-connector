@@ -20,7 +20,7 @@ use sui_sdk::{SuiClient, SuiClientBuilder};
 
 const CHANNEL_SIZE: usize = 1000;
 
-const QUERY_PAGE_SZIE: usize = 100;
+const QUERY_PAGE_SZIE: usize = 1000;
 
 const EVENT_TYPES: &'static [&'static str] = &["0x3::validator_set::ValidatorEpochInfoEventV2"];
 
@@ -164,16 +164,16 @@ async fn query_events(
                     .query_events(query.clone(), cursor, Some(query_size), true)
                     .await?;
 
+                is_first = false;
+                cursor = page.next_cursor;
+                limit -= page.data.len();
+
                 for event in page.data {
                     tx.send(Event {
                         t: MessageType::BF,
                         e: event,
                     })?
                 }
-
-                limit -= query_size;
-                is_first = false;
-                cursor = page.next_cursor;
             }
         }
     }
