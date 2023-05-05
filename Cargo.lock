@@ -5957,7 +5957,7 @@ checksum = "034a0ad7deebf0c2abcf2435950a6666c3c15ea9d8fad0c0f48efa8a7f843fed"
 [[package]]
 name = "nakji-connector"
 version = "0.1.0"
-source = "git+https://github.com/nakji-network/connector-rust.git?rev=f174a43#f174a43d775684fb5de7199dd0e768bc0fc03323"
+source = "git+https://github.com/nakji-network/connector-rust.git?rev=0bec162#0bec1620acaf3171d9436bfe9770d894c83bda1c"
 dependencies = [
  "config 0.13.3",
  "env_logger 0.10.0",

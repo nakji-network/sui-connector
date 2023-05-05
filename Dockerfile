@@ -17,4 +17,7 @@ COPY . .
 RUN cargo build --release
 RUN mv target/release/sui /usr/local/bin
 
+RUN mkdir /proto
+ENV DESCRIPTOR_OUTPUT_DIR /proto
+
 CMD ["sui"]

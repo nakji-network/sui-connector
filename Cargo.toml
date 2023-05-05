@@ -12,7 +12,7 @@ fastcrypto = "0.1.4"
 futures = "0.3"
 hex = "0.4.3"
 move-core-types = "0.0.3"
-nakji-connector = { git = "https://github.com/nakji-network/connector-rust.git", rev = "f174a43" }
+nakji-connector = { git = "https://github.com/nakji-network/connector-rust.git", rev = "0bec162" }
 protobuf = "3.2.0"
 protobuf-json-mapping = "3.2.0"
 serde = "1.0.160"
