@@ -9255,6 +9255,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "stderrlog"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69a26bbf6de627d389164afa9783739b56746c6c72c4ed16539f4ff54170327b"
+dependencies = [
+ "atty",
+ "chrono",
+ "log",
+ "termcolor",
+ "thread_local",
+]
+
+[[package]]
 name = "str-buf"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9374,12 +9387,14 @@ dependencies = [
  "fastcrypto 0.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures",
  "hex",
+ "log",
  "move-core-types 0.0.3",
  "nakji-connector",
  "protobuf 3.2.0",
  "protobuf-json-mapping",
  "serde 1.0.160",
  "serde_json",
+ "stderrlog",
  "sui-sdk",
  "time 0.3.20",
  "tokio",
