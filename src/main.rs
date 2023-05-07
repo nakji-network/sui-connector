@@ -1,14 +1,14 @@
-mod sui_system;
+mod event;
 
 use std::sync::mpsc;
 use std::vec;
 
-use crate::sui_system::validator_set::ValidatorEpochInfoEventV2;
-use crate::sui_system::validator_set_json::ValidatorEpochInfoEventV2JSON;
-
 use anyhow::bail;
 use clap::Parser;
+use event::event::SwappedEvent;
+use event::event_json::SwappedEventJSON;
 use futures::StreamExt;
+use log::{debug, error, info};
 use nakji_connector::connector::Connector;
 use nakji_connector::kafka_utils::key::Key;
 use nakji_connector::kafka_utils::{topic, Message, MessageType, Topic};
@@ -22,13 +22,18 @@ const CHANNEL_SIZE: usize = 1000;
 
 const QUERY_PAGE_SZIE: usize = 1000;
 
-const EVENT_TYPES: &'static [&'static str] = &["0x3::validator_set::ValidatorEpochInfoEventV2"];
+const EVENT_TYPES: &'static [&'static str] =
+    &["0x6b84da4f5dc051759382e60352377fea9d59bc6ec92dc60e0b6387e05274415f::event::SwappedEvent"];
 
 #[derive(Parser, Debug)]
 struct Args {
     /// Limit number of events to backfill (<0: Don't Backfill, =0: Backfill all)
     #[arg(short, long, default_value_t = 0)]
     limit: i64,
+
+    /// Log level (e.g. off, trace, debug, info, warn, error)
+    #[arg(long, default_value_t = String::from("debug"))]
+    log_level: String,
 }
 
 struct Event {
@@ -40,19 +45,29 @@ struct Event {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    let log_level = match args.log_level.as_str() {
+        "off" => stderrlog::LogLevelNum::Off,
+        "trace" => stderrlog::LogLevelNum::Trace,
+        "debug" => stderrlog::LogLevelNum::Debug,
+        "info" => stderrlog::LogLevelNum::Info,
+        "warn" => stderrlog::LogLevelNum::Warn,
+        "error" => stderrlog::LogLevelNum::Error,
+        _ => bail!("invalid log_level: {}", args.log_level),
+    };
+
+    stderrlog::new()
+        .module(module_path!())
+        .timestamp(stderrlog::Timestamp::Second)
+        .verbosity(log_level)
+        .init()?;
+
     let mut c = Connector::new();
 
-    c.register_protos(
-        MessageType::FCT,
-        vec![Box::new(ValidatorEpochInfoEventV2::new())],
-    )
-    .await;
+    c.register_protos(MessageType::FCT, vec![Box::new(SwappedEvent::new())])
+        .await;
 
-    c.register_protos(
-        MessageType::BF,
-        vec![Box::new(ValidatorEpochInfoEventV2::new())],
-    )
-    .await;
+    c.register_protos(MessageType::BF, vec![Box::new(SwappedEvent::new())])
+        .await;
 
     let ws_url = c.config.sub_config["ws_url"]
         .as_str()
@@ -62,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
         .as_str()
         .unwrap_or("http://127.0.0.1:9000");
 
-    println!("connect to [{}] [{}]", ws_url, http_url);
+    info!("connect to [{}] [{}]", ws_url, http_url);
 
     let sui = SuiClientBuilder::default()
         .ws_url(ws_url)
@@ -84,26 +99,26 @@ async fn main() -> anyhow::Result<()> {
             };
 
             tokio::spawn(async move {
-                println!("query [{}] started", event_type);
+                info!("query [{}] started", event_type);
                 match query_events(sui, tx, filter, limit).await {
-                    Ok(_) => println!("query [{}] stopped", event_type),
-                    Err(err) => println!("query [{}] failed: {}", event_type, err),
+                    Ok(_) => info!("query [{}] stopped", event_type),
+                    Err(err) => info!("query [{}] failed: {}", event_type, err),
                 }
             });
         }
     }
 
     tokio::spawn(async move {
-        println!("subscription started");
+        info!("subscription started");
         match subscribe(sui, tx).await {
-            Ok(_) => println!("subscription stopped"),
-            Err(err) => println!("subscription failed: {}", err),
+            Ok(_) => info!("subscription stopped"),
+            Err(err) => info!("subscription failed: {}", err),
         }
     });
 
     for event in rx {
         if let Err(err) = handle_event(&mut c, event).await {
-            println!("{}", err)
+            error!("{}", err)
         }
     }
 
@@ -188,19 +203,19 @@ async fn handle_event(c: &mut Connector, event: Event) -> anyhow::Result<()> {
     match e.timestamp_ms {
         None => bail!("event without timestamp: {:?}", e.id),
         Some(timestamp_ms) => match e.type_.to_string().as_str() {
-            "0x3::validator_set::ValidatorEpochInfoEventV2" => {
-                let data = serde_json::from_value::<ValidatorEpochInfoEventV2JSON>(e.parsed_json)?;
+            "0x6b84da4f5dc051759382e60352377fea9d59bc6ec92dc60e0b6387e05274415f::event::SwappedEvent" => {
+                let data = serde_json::from_value::<SwappedEventJSON>(e.parsed_json)?;
                 let proto_msg = data.protobuf_message(timestamp_ms, &e.id)?;
 
-                let topic = topic(&c, Box::new(ValidatorEpochInfoEventV2::new()), t.clone());
+                let topic = topic(&c, Box::new(SwappedEvent::new()), t.clone());
                 let key = Key::new(String::from(""), String::from(""));
                 let msg = Message::new(topic, key, proto_msg);
 
                 c.producer.produce_transactional_messages(vec![msg]).await?;
 
-                println!("{:?} -> {}", t, e.type_);
+                debug!("{:?} -> {}", t, e.type_);
 
-                return Ok(());
+                Ok(())
             }
             _ => bail!("unhandled event: {}", e.type_),
         },

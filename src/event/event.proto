@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+import "google/protobuf/timestamp.proto";
+
+package nakji.sui.event;
+
+option go_package = "github.com/nakji-network/sui-connector";
+
+message SwappedEvent {
+    google.protobuf.Timestamp ts = 1;
+    bytes tx_digest = 2;
+    uint64 event_seq = 3;
+    bytes global = 4;
+    string lp_name = 5;
+    uint64 coin_x_in = 6;
+    uint64 coin_x_out = 7;
+    uint64 coin_y_in = 8;
+    uint64 coin_y_out = 9;
+}
