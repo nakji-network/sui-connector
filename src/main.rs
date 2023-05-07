@@ -63,6 +63,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut c = Connector::new();
 
+    info!("connect to kafka [{}]", c.config.kafka_url);
+    info!("connect to proto registry [{}]", c.config.proto_registry_host);
+
     c.register_protos(MessageType::FCT, vec![Box::new(SwappedEvent::new())])
         .await;
 
@@ -77,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
         .as_str()
         .unwrap_or("http://127.0.0.1:9000");
 
-    info!("connect to [{}] [{}]", ws_url, http_url);
+    info!("connect to SUI [{}] [{}]", ws_url, http_url);
 
     let sui = SuiClientBuilder::default()
         .ws_url(ws_url)
