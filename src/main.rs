@@ -56,7 +56,6 @@ async fn main() -> anyhow::Result<()> {
     };
 
     stderrlog::new()
-        .module(module_path!())
         .timestamp(stderrlog::Timestamp::Second)
         .verbosity(log_level)
         .init()?;
@@ -64,7 +63,10 @@ async fn main() -> anyhow::Result<()> {
     let mut c = Connector::new();
 
     info!("connect to kafka [{}]", c.config.kafka_url);
-    info!("connect to proto registry [{}]", c.config.proto_registry_host);
+    info!(
+        "connect to proto registry [{}]",
+        c.config.proto_registry_host
+    );
 
     c.register_protos(MessageType::FCT, vec![Box::new(SwappedEvent::new())])
         .await;
@@ -105,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
                 info!("query [{}] started", event_type);
                 match query_events(sui, tx, filter, limit).await {
                     Ok(_) => info!("query [{}] stopped", event_type),
-                    Err(err) => info!("query [{}] failed: {}", event_type, err),
+                    Err(err) => error!("query [{}] failed: {}", event_type, err),
                 }
             });
         }
@@ -115,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
         info!("subscription started");
         match subscribe(sui, tx).await {
             Ok(_) => info!("subscription stopped"),
-            Err(err) => info!("subscription failed: {}", err),
+            Err(err) => error!("subscription failed: {}", err),
         }
     });
 
