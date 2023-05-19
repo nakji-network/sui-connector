@@ -1,6 +1,8 @@
 mod event;
 
+use std::collections::HashMap;
 use std::sync::mpsc;
+use std::time::Duration;
 use std::vec;
 
 use anyhow::bail;
@@ -8,7 +10,7 @@ use clap::Parser;
 use event::event::SwappedEvent;
 use event::event_json::SwappedEventJSON;
 use futures::StreamExt;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use nakji_connector::connector::Connector;
 use nakji_connector::kafka_utils::key::Key;
 use nakji_connector::kafka_utils::{topic, Message, MessageType, Topic};
@@ -17,28 +19,62 @@ use serde_json;
 use sui_sdk::rpc_types::{EventFilter, SuiEvent};
 use sui_sdk::types::event::EventID;
 use sui_sdk::{SuiClient, SuiClientBuilder};
+use tokio::time::timeout;
 
 const CHANNEL_SIZE: usize = 1000;
 
 const QUERY_PAGE_SZIE: usize = 1000;
+
+const WEBSOCKET_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 const EVENT_TYPES: &'static [&'static str] =
     &["0x6b84da4f5dc051759382e60352377fea9d59bc6ec92dc60e0b6387e05274415f::event::SwappedEvent"];
 
 #[derive(Parser, Debug)]
 struct Args {
-    /// Limit number of events to backfill (<0: Don't Backfill, =0: Backfill all)
-    #[arg(short, long, default_value_t = 0)]
+    /// Limit number of events to backfill (<0: Don't backfill, =0: Backfill all)
+    #[arg(short = 'b', long, default_value_t = 0)]
     limit: i64,
 
     /// Log level (e.g. off, trace, debug, info, warn, error)
-    #[arg(long, default_value_t = String::from("debug"))]
+    #[arg(short, long, default_value_t = String::from("debug"))]
     log_level: String,
 }
 
 struct Event {
     t: MessageType,
     e: SuiEvent,
+}
+
+#[derive(Clone)]
+struct SuiClientWrapper {
+    ws_url: String,
+    http_url: String,
+    client: SuiClient,
+}
+
+impl SuiClientWrapper {
+    async fn new(ws_url: String, http_url: String) -> anyhow::Result<Self> {
+        let client = Self::build_client(ws_url.clone(), http_url.clone()).await?;
+        Ok(Self {
+            ws_url,
+            http_url,
+            client,
+        })
+    }
+
+    async fn build_client(ws_url: String, http_url: String) -> anyhow::Result<SuiClient> {
+        let client = SuiClientBuilder::default()
+            .ws_url(ws_url)
+            .build(http_url)
+            .await?;
+        Ok(client)
+    }
+
+    async fn reconnect(&mut self) -> anyhow::Result<()> {
+        self.client = Self::build_client(self.ws_url.clone(), self.http_url.clone()).await?;
+        Ok(())
+    }
 }
 
 #[tokio::main]
@@ -84,10 +120,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("connect to SUI [{}] [{}]", ws_url, http_url);
 
-    let sui = SuiClientBuilder::default()
-        .ws_url(ws_url)
-        .build(http_url)
-        .await?;
+    let sui = SuiClientWrapper::new(ws_url.to_string(), http_url.to_string()).await?;
 
     let (tx, rx) = mpsc::sync_channel::<Event>(CHANNEL_SIZE);
 
@@ -105,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
 
             tokio::spawn(async move {
                 info!("query [{}] started", event_type);
-                match query_events(sui, tx, filter, limit).await {
+                match query_events(sui.client.clone(), tx, filter, limit).await {
                     Ok(_) => info!("query [{}] stopped", event_type),
                     Err(err) => error!("query [{}] failed: {}", event_type, err),
                 }
@@ -130,7 +163,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn subscribe(sui: SuiClient, tx: mpsc::SyncSender<Event>) -> anyhow::Result<()> {
+async fn subscribe(mut sui: SuiClientWrapper, tx: mpsc::SyncSender<Event>) -> anyhow::Result<()> {
     let mut event_types = Vec::new();
     for event_type in EVENT_TYPES {
         event_types.push(EventFilter::MoveEventType(
@@ -139,13 +172,119 @@ async fn subscribe(sui: SuiClient, tx: mpsc::SyncSender<Event>) -> anyhow::Resul
     }
     let filter = EventFilter::Any(event_types);
 
-    let mut ss = sui.event_api().subscribe_event(filter).await?;
+    let mut ss = sui
+        .client
+        .event_api()
+        .subscribe_event(filter.clone())
+        .await?;
+
+    // If there is possible gap for a certain event type
+    let mut possible_gaps = HashMap::<String, bool>::new();
+
+    // Store id of the last event recevied for each event type
+    let mut last_event_ids = HashMap::<String, EventID>::new();
+
+    loop {
+        match timeout(WEBSOCKET_TIMEOUT, ss.next()).await {
+            Ok(iter) => match iter {
+                Some(result) => {
+                    let event = result?;
+                    let event_type = event.type_.to_string();
+                    let possible_gap = possible_gaps.get(&event_type).unwrap_or(&false).clone();
+                    let last_event_id = last_event_ids.get(&event_type);
+
+                    if possible_gap && last_event_id.is_some() {
+                        let from = last_event_id.unwrap().clone();
+                        let to = event.id.clone();
+                        info!(
+                            "start querying gap for [{}] from [{:?}] to [{:?}]",
+                            event_type, from, to
+                        );
+                        let filter = EventFilter::MoveEventType(
+                            sui_sdk::types::parse_sui_struct_tag(event_type.as_str())?,
+                        );
+                        query_gap(
+                            sui.client.clone(),
+                            tx.clone(),
+                            filter,
+                            from.clone(),
+                            to.clone(),
+                        )
+                        .await?;
+                        info!(
+                            "stop querying gap for [{}] from [{:?}] to [{:?}]",
+                            event_type, from, to
+                        );
+                    }
+
+                    possible_gaps.insert(event_type.clone(), false);
+                    last_event_ids.insert(event_type, event.id.clone());
+
+                    tx.send(Event {
+                        t: MessageType::FCT,
+                        e: event,
+                    })?
+                }
+                None => break,
+            },
+            Err(_) => {
+                warn!(
+                    "websocket inactive for {}s, initiate new connection",
+                    WEBSOCKET_TIMEOUT.as_secs()
+                );
+
+                for v in possible_gaps.values_mut() {
+                    *v = true;
+                }
+
+                sui.reconnect().await?;
+
+                ss = sui
+                    .client
+                    .event_api()
+                    .subscribe_event(filter.clone())
+                    .await?
+            }
+        }
+    }
 
     while let Some(event) = ss.next().await {
         tx.send(Event {
             t: MessageType::FCT,
             e: event?,
         })?
+    }
+
+    Ok(())
+}
+
+async fn query_gap(
+    sui: SuiClient,
+    tx: mpsc::SyncSender<Event>,
+    filter: EventFilter,
+    from: EventID,
+    to: EventID,
+) -> anyhow::Result<()> {
+    let mut cursor = Some(from.clone());
+
+    'outer: while cursor.is_some() {
+        let page = sui
+            .event_api()
+            .query_events(filter.clone(), cursor, Some(QUERY_PAGE_SZIE), false)
+            .await?;
+        for event in page.data {
+            if event.id == from {
+                continue;
+            }
+            if event.id == to {
+                break 'outer;
+            }
+            tx.send(Event {
+                t: MessageType::FCT,
+                e: event,
+            })?
+        }
+        cursor = page.next_cursor;
     }
 
     Ok(())
