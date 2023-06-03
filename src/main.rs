@@ -1,4 +1,5 @@
 mod event;
+mod pool;
 
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -7,8 +8,6 @@ use std::vec;
 
 use anyhow::bail;
 use clap::Parser;
-use event::event::SwappedEvent;
-use event::event_json::SwappedEventJSON;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
 use nakji_connector::connector::Connector;
@@ -27,8 +26,10 @@ const QUERY_PAGE_SZIE: usize = 1000;
 
 const WEBSOCKET_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-const EVENT_TYPES: &'static [&'static str] =
-    &["0x6b84da4f5dc051759382e60352377fea9d59bc6ec92dc60e0b6387e05274415f::event::SwappedEvent"];
+const EVENT_TYPES: &'static [&'static str] = &[
+    "0x6b84da4f5dc051759382e60352377fea9d59bc6ec92dc60e0b6387e05274415f::event::SwappedEvent",
+    "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::SwapEvent",
+];
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -104,11 +105,23 @@ async fn main() -> anyhow::Result<()> {
         c.config.proto_registry_host
     );
 
-    c.register_protos(MessageType::FCT, vec![Box::new(SwappedEvent::new())])
-        .await;
+    c.register_protos(
+        MessageType::FCT,
+        vec![
+            Box::new(event::event::SwappedEvent::new()),
+            Box::new(pool::pool::SwappedEvent::new()),
+        ],
+    )
+    .await;
 
-    c.register_protos(MessageType::BF, vec![Box::new(SwappedEvent::new())])
-        .await;
+    c.register_protos(
+        MessageType::BF,
+        vec![
+            Box::new(event::event::SwappedEvent::new()),
+            Box::new(pool::pool::SwappedEvent::new()),
+        ],
+    )
+    .await;
 
     let ws_url = c.config.sub_config["ws_url"]
         .as_str()
@@ -348,10 +361,24 @@ async fn handle_event(c: &mut Connector, event: Event) -> anyhow::Result<()> {
         None => bail!("event without timestamp: {:?}", e.id),
         Some(timestamp_ms) => match e.type_.to_string().as_str() {
             "0x6b84da4f5dc051759382e60352377fea9d59bc6ec92dc60e0b6387e05274415f::event::SwappedEvent" => {
-                let data = serde_json::from_value::<SwappedEventJSON>(e.parsed_json)?;
+                let data = serde_json::from_value::<event::event_json::SwappedEventJSON>(e.parsed_json)?;
                 let proto_msg = data.protobuf_message(timestamp_ms, &e.id)?;
 
-                let topic = topic(&c, Box::new(SwappedEvent::new()), t.clone());
+                let topic = topic(&c, Box::new(event::event::SwappedEvent::new()), t.clone());
+                let key = Key::new(String::from(""), String::from(""));
+                let msg = Message::new(topic, key, proto_msg);
+
+                c.producer.produce_transactional_messages(vec![msg]).await?;
+
+                debug!("{:?} -> {}", t, e.type_);
+
+                Ok(())
+            }
+            "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::SwapEvent" => {
+                let data = serde_json::from_value::<pool::pool_json::SwappedEventJSON>(e.parsed_json)?;
+                let proto_msg = data.protobuf_message(timestamp_ms, &e.id)?;
+
+                let topic = topic(&c, Box::new(pool::pool::SwappedEvent::new()), t.clone());
                 let key = Key::new(String::from(""), String::from(""));
                 let msg = Message::new(topic, key, proto_msg);
 
